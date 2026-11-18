@@ -1,5 +1,6 @@
 # Created by the app on first run; contains local imported data.
-movie_insights.sqlite
-movie_insights.sqlite-shm
-movie_insights.sqlite-wal
+movie_insights*.sqlite
+movie_insights*.sqlite-shm
+movie_insights*.sqlite-wal
+data/
 .Renviron
