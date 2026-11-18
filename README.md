@@ -1,6 +1,6 @@
 # SCREEN / SENSE
 
-An R full stack project for exploring movie ratings, genres, and audience review sentiment. The first tab searches the live TMDB catalog by movie title, retrieves the selected film's metadata and available audience reviews, and analyzes review tone in R. The remaining dashboard tabs explore a local SQLite sample catalog for genre comparisons.
+An R Shiny project for analyzing movie ratings, genres, and audience review sentiment. Search the included local movie dataset by title to see its rating, sampled reviews, and sentiment analysis. Dashboard tabs summarize the complete sample.
 
 ## Run the project
 
@@ -10,41 +10,44 @@ Install R, then install the packages used by the app:
 install.packages(c("shiny", "ggplot2", "dplyr", "DBI", "RSQLite", "jsonlite"))
 ```
 
-From this folder, start the application with:
+From this folder, prepare the local sample data once, then start the application:
 
 ```r
+source("scripts/prepare_sample_data.R")
 shiny::runApp()
+```
+
+The preparation script downloads the source files and writes `data/movies.csv` and `data/reviews.csv`. These local files and the SQLite database are ignored by Git. The script uses a fixed random seed, so it selects the same review sample each time.
+
+Alternatively, in a terminal:
+
+```r
+Rscript scripts/prepare_sample_data.R
+Rscript -e 'shiny::runApp()'
 ```
 
 Or open `app.R` in RStudio and click **Run App**.
 
 ## What you can explore
 
-- Filter the catalog by release year, genre, and minimum audience rating.
-- Search TMDB by movie title, choose the right release, and view its overview, genres, audience rating and reviews.
-- Run an R lexicon sentiment estimate on up to 60 available TMDB reviews for the selected film.
+- Search locally by movie title (for example, `Parasite`) and see its rating, review sentiment, and review excerpts. Type a title in **Find a movie** and click **Search movies** (or press Enter).
+- Analyze a reproducible sample of 50 real IMDb films, with up to 30 user reviews per film.
 - Compare average ratings and review tone across genres.
 - Follow rating and sentiment patterns over time.
-- Browse review excerpts and search the selected movie catalog.
+- Browse the complete movie catalog in **Movie explorer**.
 
 ## Data and analysis
 
-The **Live movie lookup** tab uses TMDB's title search, movie details, and review API endpoints. Visitors only enter a title; the app owner configures the TMDB API Read Access Token once on the server as `TMDB_API_READ_ACCESS_TOKEN` (for example in a private `.Renviron` file). The app never displays or stores the token in SQLite. TMDB requires application authentication for API requests; there is no official keyless endpoint for its live movie reviews. The app fetches metadata and reviews when a title is searched; the TMDB rating is its published average and vote count, not an independent rating study. Results depend on what TMDB has for that title, and some movies have no written reviews. The review sentiment is an explainable, small English word-lexicon estimate, not a trained sentiment model; sarcasm, negation, and non-English reviews can be misclassified.
+The local sample comes from the [MansaT IMDb Movie Dataset](https://huggingface.co/datasets/MansaT/Movie-Dataset), which contains IMDb movie metadata and user-written reviews. Its dataset card declares an MIT license; the source text consists of IMDb user reviews, so check upstream terms before redistributing review text. The preparation script pins dataset revision `68771d0e2dacbbdc76f202158bffb7e69e2b52da`, selects 50 titles across available primary genres, reads their IMDb ratings, vote counts, years, and genres, and samples up to 30 reviews per film with a fixed random seed. This selected sample is not representative of all movies or viewers. The project is for classroom demonstration and is not affiliated with or endorsed by IMDb. Downloaded source files are kept local and are not tracked in Git.
 
-The local dashboard also creates `movie_insights.sqlite` on first launch and seeds it with a deterministic demonstration catalog of 720 generated films and 2,160 generated reviews. Those rows exist to demonstrate multi-film genre comparisons and are not real movie records or audience research. The database persists imported CSV data across restarts.
+The sentiment estimate is a transparent lexicon baseline implemented in `R/sentiment.R`. It tokenizes English review text, counts matches to fixed positive and negative word lists, and flips a matched word if a negator occurs within the prior three tokens. Polarity is `(positive matches - negative matches) / all matched words`, mapped to 0–100%. Scores at or above 57.5% are labeled Positive, scores at or below 42.5% Critical, and scores between them Mixed. Text with no lexicon matches receives a neutral 50% score and Mixed label. This is an explainable heuristic rather than a trained or validated model; sarcasm, context, intensifiers, non-English text, and lexicon gaps can lead to errors.
 
-Use **Add your data** in the sidebar to append CSV data to SQLite. A movies CSV must have `title`, `genre`, `year`, `rating`, and `votes` columns. A reviews CSV must have `movie_id`, `review`, `sentiment`, and `score` columns. Sentiment must be `Positive`, `Mixed`, or `Critical`, and score must be between 0 and 1. Import films first. The Movie Explorer shows each record's database ID; use that ID as `movie_id` when attaching reviews. Sentiment groups in the starter data are generated labels; for real reviews, add and document your sentiment method before interpreting the results.
-
-The database file is local and untracked data: back it up before deleting it. Removing it resets the app to its starter dataset the next time the app launches.
-
-TMDB asks non-commercial API users to attribute the source and show its logo. This product uses the TMDB API but is not endorsed or certified by TMDB. See TMDB's [API FAQ and attribution rules](https://developer.themoviedb.org/docs/faq).
+The SQLite file `movie_insights_expanded.sqlite` is local and untracked. It is initialized from the prepared sample only when first created and persists the local dataset across restarts. Back it up before deleting it.
 
 ## Stack
 
-- **R + Shiny** for the interactive frontend, API calls, and server-side analysis
+- **R + Shiny** for the interactive frontend and server-side analysis
 - **SQLite + DBI/RSQLite** for persistent movies and reviews tables
-- **TMDB API** for live title search, movie metadata, ratings, artwork, and audience reviews
-- **jsonlite** for decoding API responses
 - **dplyr** for data preparation and summaries
 - **ggplot2** for statistical visualizations
 - Custom CSS for the responsive dashboard interface
