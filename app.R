@@ -3,76 +3,23 @@ library(ggplot2)
 library(dplyr)
 library(DBI)
 library(RSQLite)
-library(jsonlite)
+source(file.path("R", "sentiment.R"))
 
 # -----------------------------------------------------------------------------
 # SCREEN / SENSE — an interactive movie ratings & review analysis in R
-# The included data is generated reproducibly for a self-contained demo.
-# Replace make_movies() and make_reviews() with your own CSV imports as needed.
+# Local sample data is prepared from a public educational IMDb review dataset.
 # -----------------------------------------------------------------------------
 
-set.seed(42)
-
-genre_profiles <- data.frame(
-  genre = c("Drama", "Comedy", "Thriller", "Romance", "Action", "Sci-Fi", "Animation", "Documentary", "Horror", "Adventure"),
-  rating_center = c(7.35, 6.85, 7.10, 6.95, 6.75, 7.20, 7.45, 7.55, 6.35, 7.00),
-  vote_center = c(18000, 14500, 22000, 12000, 35000, 28000, 24000, 6500, 16500, 26000),
-  sentiment = c(.69, .73, .62, .77, .65, .71, .82, .80, .54, .74),
-  stringsAsFactors = FALSE
-)
-
-movie_titles <- c(
-  "The Quiet Between", "A Map of Tomorrow", "Small Hours", "The Last Lightkeeper", "Blue Sunday",
-  "After the Rain", "Paper Moons", "Somewhere, Still", "A Kind of Ordinary", "North of June",
-  "The Long Way Home", "All the Bright Rooms", "A Soft Landing", "The Other Shore", "Golden Hour",
-  "Nothing Like Before", "The Shape of Us", "Halfway to Morning", "Wildflower Season", "In Good Company",
-  "The Far Side of Summer", "Room for Wonder", "A Borrowed Sky", "The Night Archive", "One More Spring",
-  "What We Leave Behind", "The Sunday Club", "When We Were Elsewhere", "The Unfinished Story", "Open Water"
-)
-
-make_movies <- function(n = 720) {
-  genres <- sample(genre_profiles$genre, n, replace = TRUE, prob = c(1.2, 1, 1, .9, 1.1, .9, .65, .45, .8, .85))
-  gp <- genre_profiles[match(genres, genre_profiles$genre), ]
-  year <- sample(1995:2025, n, replace = TRUE)
-  data.frame(
-    id = seq_len(n),
-    title = paste(sample(movie_titles, n, replace = TRUE), year),
-    genre = genres,
-    year = year,
-    rating = round(pmin(9.8, pmax(2.1, rnorm(n, gp$rating_center, .82))), 1),
-    votes = pmax(210, round(rlnorm(n, log(gp$vote_center), .78))),
-    stringsAsFactors = FALSE
-  )
+seed_file <- function(name) file.path("data", name)
+if (!all(file.exists(seed_file("movies.csv"), seed_file("reviews.csv")))) {
+  stop("Real sample data is missing. Run Rscript scripts/prepare_sample_data.R first.")
 }
+seed_movies <- read.csv(seed_file("movies.csv"), stringsAsFactors = FALSE)
+seed_reviews <- read.csv(seed_file("reviews.csv"), stringsAsFactors = FALSE)
 
-review_bits <- list(
-  positive = c("beautifully made", "quietly moving", "the performances feel effortless", "a wonderful surprise", "stays with you long after", "visually stunning", "genuinely funny", "a lovely story", "the pacing is perfect", "warm and thoughtful"),
-  negative = c("hard to stay invested", "the story feels predictable", "a little too long", "the characters feel thin", "the ending misses the mark", "uneven pacing", "not as memorable as it should be", "a disappointing sequel", "the dialogue feels forced", "beautiful but emotionally distant"),
-  mixed = c("an interesting idea with uneven execution", "some lovely moments, though it loses its way", "the cast is strong but the story drifts", "not perfect, but there is plenty to like", "a promising start with a quieter finish", "good intentions and a few rough edges", "visually rich, if a little slow", "the ending may divide audiences", "a mixed bag with real highlights", "worth a watch, with reservations")
-)
-
-make_reviews <- function(movies, per_movie = 3L) {
-  movie_i <- rep(seq_len(nrow(movies)), each = per_movie)
-  n <- length(movie_i)
-  sentiment_class <- sample(c("Positive", "Mixed", "Critical"), n, TRUE, c(.59, .27, .14))
-  sentences <- vapply(seq_len(n), function(i) {
-    bucket <- switch(sentiment_class[i], Positive = "positive", Mixed = "mixed", Critical = "negative")
-    paste(review_bits[[bucket]][sample.int(length(review_bits[[bucket]]), 1)],
-          "", "A", tolower(movies$genre[movie_i[i]]), "that knows its audience.")
-  }, character(1))
-  data.frame(movie_id = movies$id[movie_i], review = sentences,
-             sentiment = sentiment_class,
-             score = ifelse(sentiment_class == "Positive", runif(n, .68, .98),
-                            ifelse(sentiment_class == "Critical", runif(n, .04, .34), runif(n, .38, .64))),
-             stringsAsFactors = FALSE)
-}
-
-seed_movies <- make_movies()
-seed_reviews <- make_reviews(seed_movies)
-
-# SQLite is the persistent data layer. The demo catalog is inserted only when
-# the database is first created; future launches keep imported records.
-db_file <- file.path(getwd(), "movie_insights.sqlite")
+# SQLite is the persistent data layer. The prepared source sample is inserted
+# only when the database is first created; future launches keep imported rows.
+db_file <- file.path(getwd(), "movie_insights_expanded.sqlite")
 db <- dbConnect(SQLite(), db_file)
 dbExecute(db, "PRAGMA foreign_keys = ON")
 dbExecute(db, "CREATE TABLE IF NOT EXISTS movies (
@@ -98,42 +45,11 @@ reviews <- load_reviews()
 fmt_num <- function(x) format(round(x), big.mark = ",", scientific = FALSE)
 fmt_pct <- function(x) paste0(round(x * 100), "%")
 
-tmdb_request <- function(path, token, query = list()) {
-  query_string <- if (length(query)) {
-    paste0("?", paste(vapply(names(query), function(key) {
-      paste0(utils::URLencode(key, reserved = TRUE), "=", utils::URLencode(as.character(query[[key]]), reserved = TRUE))
-    }, character(1)), collapse = "&"))
-  } else ""
-  url <- paste0("https://api.themoviedb.org/3", path, query_string)
-  body_file <- tempfile(fileext = ".json")
-  on.exit(unlink(body_file), add = TRUE)
-  utils::download.file(url, body_file, method = "libcurl", mode = "wb", quiet = TRUE,
-                       headers = c(Authorization = paste("Bearer", token)))
-  response <- jsonlite::fromJSON(paste(readLines(body_file, warn = FALSE), collapse = ""), simplifyVector = FALSE)
-  if (!is.null(response$status_code) && response$status_code >= 400) {
-    stop(response$status_message %||% paste("TMDB returned", response$status_code))
-  }
-  response
-}
-
-score_review <- function(review_text) {
-  positive <- c("amazing", "beautiful", "best", "brilliant", "charming", "enjoyed", "excellent", "fantastic", "fun", "funny", "good", "great", "impressive", "love", "loved", "masterpiece", "moving", "perfect", "powerful", "strong", "wonderful")
-  negative <- c("annoying", "awful", "bad", "boring", "confusing", "disappointing", "dull", "fail", "flat", "forgettable", "hate", "hated", "mess", "poor", "predictable", "slow", "terrible", "weak", "waste", "worst")
-  words <- tolower(unlist(strsplit(gsub("[^[:alpha:]']", " ", review_text), "\\s+")))
-  pos <- sum(words %in% positive)
-  neg <- sum(words %in% negative)
-  if (pos > neg) "Positive" else if (neg > pos) "Critical" else "Mixed"
-}
-
-tmdb_server_token <- function() {
-  token <- Sys.getenv("TMDB_API_READ_ACCESS_TOKEN", unset = "")
-  if (!nzchar(trimws(token))) NULL else trimws(token)
-}
-
 ui <- fluidPage(
   tags$head(
     tags$title("SCREEN / SENSE — Movie audience intelligence"),
     tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
+    tags$script(HTML("$(document).on('keydown', '#movie_query', function(e) { if (e.key === 'Enter') { e.preventDefault(); $('#movie_search').click(); } });")),
     tags$link(rel = "preconnect", href = "https://fonts.googleapis.com"),
     tags$link(rel = "preconnect", href = "https://fonts.gstatic.com", crossorigin = "anonymous"),
     tags$link(href = "https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@500;600;700&display=swap", rel = "stylesheet"),
@@ -190,15 +106,11 @@ ui <- fluidPage(
       .review-quote { font-family:"Playfair Display",serif;font-style:italic;font-size:15px;color:#32484e;line-height:1.45; }
       .review-meta { display:flex;justify-content:space-between;color:#899694;font-family:"DM Mono",monospace;font-size:9px;letter-spacing:.5px;margin-top:10px;text-transform:uppercase; }
       .review-chip { color:var(--teal); }
-      .online-movie { display:grid;grid-template-columns:180px 1fr;gap:22px;align-items:start; }
-      .online-poster { width:100%;max-width:180px;border-radius:4px;box-shadow:0 8px 22px rgba(21,42,52,.14); }
+      .local-movie { display:block; }
       .online-title { font-family:"Playfair Display",serif;font-size:28px;font-weight:500;margin:4px 0 12px;color:var(--ink); }
       .online-score { display:flex;gap:10px;align-items:center;margin-bottom:14px;color:#829096;font-family:"DM Mono",monospace;font-size:10px; }
       .online-overview { color:#52636a;font-size:13px;line-height:1.75;max-width:820px; }
       .online-kpi .kpi-value { font-size:24px;color:var(--teal); }
-      .tmdb-credit {display:flex;align-items:center;gap:16px;color:#758387;font-size:10px;line-height:1.7;}
-      .tmdb-credit img {width:44px;height:44px;object-fit:contain;}
-      .tmdb-credit strong {color:#52636a;}
       .data-table { width:100%;border-collapse:collapse;font-size:11px; }
       .data-table th { color:#849294;font-family:"DM Mono",monospace;font-size:9px;letter-spacing:.9px;text-align:left;text-transform:uppercase;padding:10px;border-bottom:1px solid var(--line); }
       .data-table td { padding:10px;border-bottom:1px solid #efeee9;color:#52636a; }
@@ -208,7 +120,7 @@ ui <- fluidPage(
       .footer { border-top:1px solid var(--line);margin-top:24px;padding-top:15px;color:#99a3a2;font-family:"DM Mono",monospace;font-size:9px;letter-spacing:.6px;display:flex;justify-content:space-between; }
       .shiny-input-container { width:100%; }
       @media(max-width:1000px) { .shell{grid-template-columns:210px 1fr}.main{padding:27px 24px}.topbar{padding:0 24px}.chart-row{grid-template-columns:1fr}.kpi-grid{grid-template-columns:repeat(2,1fr)} }
-      @media(max-width:650px) { .shell{display:block}.sidebar{border-right:0;border-bottom:1px solid var(--line);padding:20px}.main{padding:23px 16px}.topbar{padding:0 16px;height:60px}.top-meta{display:none}h1{font-size:29px}.hero{display:block}.period-tag{display:inline-block;margin-top:15px}.kpi-grid{gap:8px}.kpi{padding:14px;min-height:95px}.kpi-value{font-size:24px}.chart-row,.chart-row.equal{grid-template-columns:1fr}.nav-tabs>li>a{padding:11px 9px;font-size:11px}.footer{display:block;line-height:1.8}.online-movie{grid-template-columns:95px 1fr;gap:14px}.online-title{font-size:22px}.online-poster{width:95px}.tmdb-credit{align-items:flex-start} }
+      @media(max-width:650px) { .shell{display:block}.sidebar{border-right:0;border-bottom:1px solid var(--line);padding:20px}.main{padding:23px 16px}.topbar{padding:0 16px;height:60px}.top-meta{display:none}h1{font-size:29px}.hero{display:block}.period-tag{display:inline-block;margin-top:15px}.kpi-grid{gap:8px}.kpi{padding:14px;min-height:95px}.kpi-value{font-size:24px}.chart-row,.chart-row.equal{grid-template-columns:1fr}.nav-tabs>li>a{padding:11px 9px;font-size:11px}.footer{display:block;line-height:1.8}.online-title{font-size:22px} }
     '))
   ),
   div(class = "topbar",
@@ -216,37 +128,24 @@ ui <- fluidPage(
       div(class = "top-meta", "AUDIENCE INTELLIGENCE  ·  R ANALYTICS")),
   div(class = "shell",
       div(class = "sidebar",
-          div(class = "side-kicker", "Refine your view"),
-          div(class = "filter-label", "Release year"),
-          sliderInput("year", NULL, min = 1995, max = 2025, value = c(2005, 2025), sep = ""),
-          div(class = "filter-label", "Genre"),
-          selectInput("genre", NULL, choices = c("All genres", sort(unique(movies$genre))), selected = "All genres"),
-          div(class = "filter-label", "Minimum rating"),
-          sliderInput("rating", NULL, min = 2, max = 10, value = 4.0, step = .5),
-          div(class = "filter-label", "Add your data"),
-          selectInput("upload_type", NULL, choices = c("Movies CSV" = "movies", "Reviews CSV" = "reviews")),
-          fileInput("upload_csv", NULL, accept = ".csv", buttonLabel = "Choose CSV", placeholder = "No file selected"),
-          actionButton("import_csv", "Import into database", class = "btn btn-default btn-sm"),
-          uiOutput("import_status"),
-          div(class = "filter-note", tags$strong("The dataset"), "A reproducible, self-contained sample of 720 films and 2,160 audience reviews. Explore the analysis, then swap in your own movie data.")),
+          div(class = "side-kicker", "Movie dataset"),
+          div(class = "filter-note", tags$strong("Search the sample"), "Each result shows its source rating and sampled user reviews. ", tags$a(href = "https://huggingface.co/datasets/MansaT/Movie-Dataset", target = "_blank", "Dataset source")),
+          div(class = "filter-note", tags$strong("Sentiment method"), "A small word lexicon counts positive and negative terms. A negator in the prior three words flips a match. Scores become Positive, Mixed or Critical; the polarity index is an estimate, not a trained model.")),
       div(class = "main",
           div(class = "hero",
               div(div(class = "eyebrow", "THE AUDIENCE, IN THEIR OWN WORDS"),
                   h1("What makes a movie\n"), tags$span(style="font-family:'Playfair Display',serif;font-size:34px;font-weight:500;letter-spacing:-.6px;line-height:1.12;color:#347c78;", "stay with us?"),
                   div(class = "hero-sub", "Ratings, genres & the feeling behind every review.")),
-              div(class = "period-tag", "●  LIVE ANALYSIS  /  01")),
-          tabsetPanel(id = "tabs", type = "tabs", selected = "online",
-              tabPanel("Live movie lookup", value = "online",
-                  div(class="panel",div(class="panel-head",div(div(class="panel-title","Search the real movie catalog"),div(class="panel-sub","Look up a title online, then analyze its audience reviews with an R sentiment lexicon.")),div(class="panel-unit","LIVE · TMDB")),
-                      textInput("tmdb_query", "Movie title", placeholder="Try: Everything Everywhere All at Once"),
-                      actionButton("tmdb_search", "Search TMDB", class="btn btn-default btn-sm"),
-                      tags$small(style="display:block;color:#829096;margin-top:10px;line-height:1.6;", "Search by title and choose the right release. API access is configured once by the app owner; visitors do not need a token."),
-                      uiOutput("tmdb_status")),
-                  uiOutput("tmdb_picker"),uiOutput("online_movie_card"),
-                  div(class="chart-row equal",div(class="panel",div(class="panel-head",div(div(class="panel-title","Review sentiment"),div(class="panel-sub","R lexicon estimate · up to 60 TMDB reviews"))),uiOutput("online_review_summary"),div(class="plot-box",plotOutput("online_sentiment_plot",height="100%"))),
-                      div(class="panel",div(class="panel-head",div(div(class="panel-title","Audience reviews"),div(class="panel-sub","Recent reviews returned by TMDB"))),uiOutput("online_review_cards"))),
-                  div(class="panel tmdb-credit",tags$img(src="https://www.themoviedb.org/assets/2/v4/logos/v2/blue_square_2-d537fb228cf3ded904ef09b136fe3fec72548ebc1fea3fbbd1ad9e36364db38b.svg",alt="TMDB logo"),
-                      div(tags$a(href="https://www.themoviedb.org/",target="_blank","The Movie Database (TMDB)")," provides the movie metadata, ratings, artwork and reviews in this view.",tags$br(),tags$strong("This product uses the TMDB API but is not endorsed or certified by TMDB.")))),
+              div(class = "period-tag", "●  LOCAL MOVIE DATA  /  01")),
+          tabsetPanel(id = "tabs", type = "tabs", selected = "lookup",
+              tabPanel("Find a movie", value = "lookup",
+                  div(class="panel",div(class="panel-head",div(div(class="panel-title","Search this movie dataset"),div(class="panel-sub","Type a title from the included sample to see its rating, reviews and sentiment.")),div(class="panel-unit",paste(nrow(movies),"MOVIES · LOCAL DATA"))),
+                      textInput("movie_query", "Movie title", placeholder="Try Parasite, Inception, or The Matrix"),
+                      actionButton("movie_search", "Search movies", class="btn btn-primary"),
+                      uiOutput("search_status")),
+                  uiOutput("movie_picker"),uiOutput("local_movie_card"),
+                  div(class="chart-row equal",div(class="panel",div(class="panel-head",div(div(class="panel-title","Review sentiment"),div(class="panel-sub","Lexicon estimate · sampled dataset reviews"))),uiOutput("movie_review_summary"),div(class="plot-box",plotOutput("movie_sentiment_plot",height="100%"))),
+                      div(class="panel",div(class="panel-head",div(div(class="panel-title","Audience reviews"),div(class="panel-sub","Sampled reviews for the selected movie"))),uiOutput("movie_review_cards")))),
               tabPanel("Overview", value = "overview",
                   uiOutput("overview_kpis"),
                   div(class = "chart-row",
@@ -255,15 +154,19 @@ ui <- fluidPage(
                   uiOutput("overview_insight"),
                   div(class = "chart-row equal",
                       div(class="panel",div(class="panel-head",div(div(class="panel-title","How audiences feel"),div(class="panel-sub","Share of reviews in each sentiment group"))),div(class="plot-box",plotOutput("sentiment_plot",height="100%"))),
-                      div(class="panel",div(class="panel-head",div(div(class="panel-title","The films finding their audience"),div(class="panel-sub","Highest-rated titles in the current selection"))),uiOutput("top_movies")))),
+                      div(class="panel",div(class="panel-head",div(div(class="panel-title","The films finding their audience"),div(class="panel-sub","Highest-rated titles in the sample"))),uiOutput("top_movies")))),
               tabPanel("Genre study", value = "genres",
                   div(class="panel",div(class="panel-head",div(div(class="panel-title","A closer look at genre"),div(class="panel-sub","Mean rating, review tone and audience reach for every genre")),div(class="panel-unit","COMPARATIVE VIEW")),div(class="plot-box tall",plotOutput("genre_detail",height="100%"))),
                   div(class="chart-row equal",div(class="panel",div(class="panel-head",div(div(class="panel-title","Rating distribution"),div(class="panel-sub","Where each genre's scores tend to land"))),div(class="plot-box",plotOutput("rating_dist",height="100%"))),div(class="panel",div(class="panel-head",div(div(class="panel-title","Genre scorecard"),div(class="panel-sub","A compact read on audience response"))),uiOutput("genre_table")))),
               tabPanel("Audience voice", value = "voice",
-                  div(class="chart-row equal",div(class="panel",div(class="panel-head",div(div(class="panel-title","Sentiment by genre"),div(class="panel-sub","Positive, mixed and critical review share"))),div(class="plot-box tall",plotOutput("sentiment_genre",height="100%"))),div(class="panel",div(class="panel-head",div(div(class="panel-title","What viewers are saying"),div(class="panel-sub","A sample of audience language in this selection"))),uiOutput("review_cards"))),
-                  div(class="panel",div(class="panel-head",div(div(class="panel-title","Review tone over time"),div(class="panel-sub","Average sentiment score by release year"))),div(class="plot-box",plotOutput("sentiment_time",height="100%")))),
+                      div(class="panel",div(class="panel-head",div(div(class="panel-title","How sentiment is estimated"),div(class="panel-sub","The same rule is applied to every included review"))),
+                      p(style="font-size:11px;color:#52636a;line-height:1.7;margin:8px 0 4px;",
+                        "The app tokenizes English review text and counts matches in a fixed positive and negative word list. A negator among the previous three words flips a match. Polarity = (positive matches − negative matches) ÷ all matches; the result is mapped to 0–100%. Scores ≥57.5% are Positive, ≤42.5% are Critical, and the rest are Mixed. Reviews with no lexicon matches receive a neutral 50% score."),
+                      p(style="font-size:10px;color:#829096;line-height:1.6;margin:0;","This explainable baseline can miss context, sarcasm, intensifiers, and vocabulary outside the lexicon; treat the result as an estimate.")),
+                  div(class="chart-row equal",div(class="panel",div(class="panel-head",div(div(class="panel-title","Sentiment by genre"),div(class="panel-sub","Positive, mixed and critical review share"))),div(class="plot-box tall",plotOutput("sentiment_genre",height="100%"))),div(class="panel",div(class="panel-head",div(div(class="panel-title","What viewers are saying"),div(class="panel-sub","A sample of audience language from these films"))),uiOutput("review_cards"))),
+                  div(class="panel",div(class="panel-head",div(div(class="panel-title","Review tone over time"),div(class="panel-sub","Mean lexicon polarity index by release year"))),div(class="plot-box",plotOutput("sentiment_time",height="100%")))),
               tabPanel("Movie explorer", value = "movies",
-                  div(class="panel",div(class="panel-head",div(div(class="panel-title","Find a film"),div(class="panel-sub","Search the titles in your current selection"))),textInput("search",NULL,placeholder="Type a movie title or genre..."),uiOutput("movie_table")))) ,
+                  div(class="panel",div(class="panel-head",div(div(class="panel-title","All movies in the sample"),div(class="panel-sub","Ratings and vote counts from the source dataset"))),uiOutput("movie_table")))) ,
           div(class="footer",span("SCREEN / SENSE  ·  MOVIE RATINGS & GENRE SENTIMENT ANALYSIS"),span("BUILT WITH R  /  SHINY  /  GGPLOT2"))
       )
   )
@@ -271,162 +174,128 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
   onStop(function() if (dbIsValid(db)) dbDisconnect(db), session = session)
-  tmdb_results <- reactiveVal(NULL)
-  online_movie <- reactiveVal(NULL)
-  tmdb_message <- reactiveVal("Enter a movie title and a TMDB API token to search the live catalog.")
-  last_loaded_id <- reactiveVal(NULL)
-  load_online_movie <- function(movie_id, token) {
-    detail <- tmdb_request(paste0("/movie/", movie_id), token, list(language = "en-US"))
-    review_response <- tmdb_request(paste0("/movie/", movie_id, "/reviews"), token, list(language = "en-US", page = 1))
-    review_rows <- review_response$results %||% list()
-    pages <- min(as.integer(review_response$total_pages %||% 1), 3L)
-    if (pages > 1L) for (page in 2:pages) {
-      more <- tmdb_request(paste0("/movie/", movie_id, "/reviews"), token, list(language = "en-US", page = page))
-      review_rows <- c(review_rows, more$results %||% list())
+
+  search_results <- reactiveVal(NULL)
+  selected_local_movie <- reactiveVal(NULL)
+  search_message <- reactiveVal("Type a title from the sample and select Search movies.")
+
+  load_local_movie <- function(movie_id) {
+    row <- movies[movies$id == as.integer(movie_id), , drop = FALSE]
+    if (!nrow(row)) {
+      selected_local_movie(NULL)
+      return(invisible(NULL))
     }
-    if (length(review_rows)) review_rows <- lapply(review_rows, function(r) {
-      r$sentiment <- score_review(r$content %||% "")
-      r
-    })
-    online_movie(list(movie = detail, reviews = review_rows))
-    last_loaded_id(as.character(movie_id))
-    tmdb_message(paste("Live TMDB data ·", length(review_rows), "reviews analyzed by the R word lexicon."))
+    movie_reviews <- reviews[reviews$movie_id == row$id[1], , drop = FALSE]
+    review_rows <- lapply(seq_len(nrow(movie_reviews)), function(i) list(
+      content = movie_reviews$review[i],
+      sentiment = movie_reviews$sentiment[i],
+      score = movie_reviews$score[i],
+      author = "IMDb user review"
+    ))
+    selected_local_movie(list(
+      movie = list(title = row$title[1], genre = row$genre[1], year = row$year[1],
+                   rating = row$rating[1], votes = row$votes[1]),
+      reviews = review_rows
+    ))
+    invisible(NULL)
   }
-  observeEvent(input$tmdb_search, {
-    token <- tmdb_server_token()
-    query <- trimws(input$tmdb_query %||% "")
-    if (is.null(token)) { tmdb_message("Live search is not configured by the app owner yet. No token is needed from movie search users."); return() }
-    if (!nzchar(query)) { tmdb_message("Enter a movie title first."); return() }
-    tmdb_message("Searching TMDB…")
-    online_movie(NULL)
-    last_loaded_id(NULL)
-    tryCatch({
-      response <- tmdb_request("/search/movie", token, list(query = query, include_adult = "false", language = "en-US"))
-      results <- response$results %||% list()
-      if (!length(results)) {
-        tmdb_results(NULL)
-        tmdb_message(paste0("No movie matches found for ‘", query, "’. Try another title."))
-      } else {
-        tmdb_results(results)
-        labels <- vapply(results, function(m) paste0(m$title, " (", ifelse(nzchar(m$release_date %||% ""), substr(m$release_date, 1, 4), "year unknown"), ")"), character(1))
-        choices <- stats::setNames(vapply(results, function(m) as.character(m$id), character(1)), labels)
-        updateSelectInput(session, "tmdb_pick", choices = choices, selected = as.character(results[[1]]$id))
-        load_online_movie(results[[1]]$id, token)
-      }
-    }, error = function(e) tmdb_message(paste("TMDB search failed:", conditionMessage(e))))
+
+  observeEvent(input$movie_search, {
+    query <- trimws(input$movie_query %||% "")
+    if (!nzchar(query)) {
+      selected_local_movie(NULL)
+      search_results(NULL)
+      search_message("Enter a movie title first.")
+      return()
+    }
+    matches <- movies[grepl(tolower(query), tolower(movies$title), fixed = TRUE), , drop = FALSE]
+    if (!nrow(matches)) {
+      selected_local_movie(NULL)
+      search_results(NULL)
+      search_message(paste0("No title matching ‘", query, "’ is in this sample. Try a title from Movie explorer."))
+      return()
+    }
+    search_results(matches)
+    load_local_movie(matches$id[1])
+    search_message(if (nrow(matches) == 1) {
+      paste("Showing", matches$title[1], "from the local sample.")
+    } else {
+      paste(nrow(matches), "titles match. Showing the first result; choose another below.")
+    })
   })
-  output$tmdb_status <- renderUI({
-    msg <- tmdb_message()
+
+  output$movie_picker <- renderUI({
+    matches <- search_results()
+    if (is.null(matches) || nrow(matches) < 2) return(NULL)
+    choices <- stats::setNames(matches$id, paste0(matches$title, " (", matches$year, ")"))
+    selectInput("movie_pick", "Choose a matching title", choices = choices, selected = matches$id[1])
+  })
+
+  observeEvent(input$movie_pick, {
+    req(input$movie_pick)
+    load_local_movie(input$movie_pick)
+  })
+
+  output$search_status <- renderUI({
+    msg <- search_message()
     if (is.null(msg)) return(NULL)
-    div(style="font-size:11px;color:#59716d;margin-top:10px;line-height:1.6;",msg)
+    div(style = "font-size:11px;color:#59716d;margin-top:10px;line-height:1.6;", msg)
   })
-  output$tmdb_picker <- renderUI({
-    results <- tmdb_results()
-    if (is.null(results) || !length(results)) return(NULL)
-    choices <- stats::setNames(vapply(results, function(m) as.character(m$id), character(1)),
-      vapply(results, function(m) paste0(m$title, " · ", ifelse(nzchar(m$release_date %||% ""), substr(m$release_date, 1, 4), "year unknown")), character(1)))
-    selectInput("tmdb_pick", "Choose the matching release", choices = choices,
-      selected = as.character(results[[1]]$id))
-  })
-  observeEvent(input$tmdb_pick, {
-    req(input$tmdb_pick)
-    token <- tmdb_server_token()
-    if (is.null(token)) { tmdb_message("Live search is not configured by the app owner yet."); return() }
-    if (identical(as.character(input$tmdb_pick), last_loaded_id())) return()
-    tmdb_message("Loading movie details and reviews…")
-    online_movie(NULL)
-    tryCatch(load_online_movie(input$tmdb_pick, token),
-      error = function(e) tmdb_message(paste("Could not load this movie:", conditionMessage(e))))
-  })
-  output$online_movie_card <- renderUI({
-    result <- online_movie()
+
+  output$local_movie_card <- renderUI({
+    result <- selected_local_movie()
     if (is.null(result)) return(NULL)
     movie <- result$movie
-    poster <- if (!is.null(movie$poster_path) && nzchar(movie$poster_path)) paste0("https://image.tmdb.org/t/p/w500", movie$poster_path) else NULL
-    genres <- if (length(movie$genres)) paste(vapply(movie$genres, `[[`, character(1), "name"), collapse = " · ") else "Genre not listed"
-    release_year <- if (nzchar(movie$release_date %||% "")) substr(movie$release_date, 1, 4) else "Release year not listed"
-    div(class="panel online-movie",
-      if (!is.null(poster)) tags$img(class="online-poster",src=poster,alt=paste(movie$title,"poster")),
-      div(div(class="eyebrow",paste(genres," · ",release_year)),h2(class="online-title",movie$title),
-        div(class="online-score",span(class="rating-pill",paste0(sprintf("%.1f",movie$vote_average %||% 0)," / 10")),span(paste(fmt_num(movie$vote_count %||% 0),"TMDB ratings"))),
-        div(class="online-overview",movie$overview %||% "No synopsis available."),
-        div(class="panel-sub",paste("TMDB movie ID",movie$id,"· Original language",toupper(movie$original_language %||% "unknown")))))
+    div(class = "panel local-movie",
+      div(class = "eyebrow", paste(movie$genre, "·", movie$year)),
+      h2(class = "online-title", movie$title),
+      div(class = "online-score",
+        span(class = "rating-pill", paste0(sprintf("%.1f", movie$rating), " / 10")),
+        span(paste(fmt_num(movie$votes), "IMDb ratings")),
+        span(paste(length(result$reviews), "reviews in this sample")))
+    )
   })
-  output$online_review_summary <- renderUI({
-    result <- online_movie()
-    if (is.null(result)) return(div("Search for a title to see its review analysis."))
-    if (!length(result$reviews)) return(div("TMDB returned no audience reviews for this title."))
+
+  output$movie_review_summary <- renderUI({
+    result <- selected_local_movie()
+    if (is.null(result)) return(div("Search a movie to see its review analysis."))
+    if (!length(result$reviews)) return(div("No sampled reviews are available for this title."))
     classes <- vapply(result$reviews, `[[`, character(1), "sentiment")
-    div(div(class="online-kpi",div(class="kpi-value",fmt_pct(mean(classes == "Positive"))),div(class="kpi-foot","of fetched reviews read positive in the R lexicon scan")),
-      div(style="font-size:10px;color:#829096;margin:7px 0 0;",paste(length(classes),"reviews scanned · Positive / Mixed / Critical word counts")))
+    div(div(class = "online-kpi", div(class = "kpi-value", fmt_pct(mean(classes == "Positive"))),
+            div(class = "kpi-foot", "of sampled reviews were classified Positive by the lexicon")),
+        div(style = "font-size:10px;color:#829096;margin:7px 0 0;",
+            paste(length(classes), "reviews analyzed · Positive / Mixed / Critical")))
   })
-  output$online_sentiment_plot <- renderPlot({
-    result <- online_movie(); req(!is.null(result)); req(length(result$reviews) > 0)
-    counts <- table(factor(vapply(result$reviews, `[[`, character(1), "sentiment"), levels=c("Positive","Mixed","Critical")))
-    sentiment_data <- data.frame(sentiment=names(counts), count=as.integer(counts))
-    ggplot(sentiment_data,aes(x=sentiment,y=count,fill=sentiment)) + geom_col(width=.62) + geom_text(aes(label=count),vjust=-.4,color="#38515b",size=3.5) + scale_fill_manual(values=c("Positive"="#347c78","Mixed"="#c4a565","Critical"="#d78266")) + scale_y_continuous(expand=expansion(mult=c(0,.18))) + theme_screen() + theme(legend.position="none",panel.grid.major.y=element_blank())
+
+  output$movie_sentiment_plot <- renderPlot({
+    result <- selected_local_movie()
+    req(!is.null(result), length(result$reviews) > 0)
+    counts <- table(factor(vapply(result$reviews, `[[`, character(1), "sentiment"),
+                           levels = c("Positive", "Mixed", "Critical")))
+    sentiment_data <- data.frame(sentiment = names(counts), count = as.integer(counts))
+    ggplot(sentiment_data, aes(x = sentiment, y = count, fill = sentiment)) +
+      geom_col(width = .62) +
+      geom_text(aes(label = count), vjust = -.4, color = "#38515b", size = 3.5) +
+      scale_fill_manual(values = c("Positive" = "#347c78", "Mixed" = "#c4a565", "Critical" = "#d78266")) +
+      scale_y_continuous(expand = expansion(mult = c(0, .18))) +
+      theme_screen() + theme(legend.position = "none", panel.grid.major.y = element_blank())
   })
-  output$online_review_cards <- renderUI({
-    result <- online_movie()
-    if (is.null(result)) return(div("Search for a movie to load audience reviews."))
-    if (!length(result$reviews)) return(div("No TMDB reviews are available for this title."))
-    lapply(head(result$reviews,5),function(r) {
+
+  output$movie_review_cards <- renderUI({
+    result <- selected_local_movie()
+    if (is.null(result)) return(div("Search a movie to see its sampled reviews."))
+    if (!length(result$reviews)) return(div("No reviews are available for this title."))
+    lapply(head(result$reviews, 5), function(r) {
       content <- r$content %||% "Review text not available."
-      excerpt <- if (nchar(content) > 440) paste0(substr(content,1,440),"…") else content
-      div(class="review-card",div(class="review-quote",paste0("“",excerpt,"”")),div(class="review-meta",span(r$author %||% "TMDB member"),span(class="review-chip",paste("R lexicon ·",r$sentiment))))
+      excerpt <- if (nchar(content) > 440) paste0(substr(content, 1, 440), "…") else content
+      div(class = "review-card", div(class = "review-quote", paste0("“", excerpt, "”")),
+          div(class = "review-meta", span("IMDb user review"),
+              span(class = "review-chip", paste("Lexicon ·", r$sentiment))) )
     })
   })
-  data_version <- reactiveVal(0L)
-  import_message <- reactiveVal(NULL)
-  observeEvent(input$import_csv, {
-    req(input$upload_csv)
-    tryCatch({
-      incoming <- read.csv(input$upload_csv$datapath, stringsAsFactors = FALSE, check.names = FALSE)
-      if (identical(input$upload_type, "movies")) {
-        required <- c("title", "genre", "year", "rating", "votes")
-        missing <- setdiff(required, names(incoming))
-        if (length(missing)) stop(paste("Movies CSV is missing:", paste(missing, collapse = ", ")))
-        incoming <- incoming %>% select(all_of(required))
-        incoming$year <- as.integer(incoming$year)
-        incoming$rating <- as.numeric(incoming$rating)
-        incoming$votes <- as.integer(incoming$votes)
-        if (anyNA(incoming[, c("title", "genre", "year", "rating", "votes")])) stop("Movie fields must be filled with valid values.")
-        dbWriteTable(db, "movies", incoming, append = TRUE, row.names = FALSE)
-        movies <<- load_movies()
-        updateSelectInput(session, "genre", choices = c("All genres", sort(unique(movies$genre))))
-        updateSliderInput(session, "year", min = min(movies$year), max = max(movies$year), value = range(c(input$year, movies$year)))
-        import_message(paste(nrow(incoming), "movies added to SQLite."))
-      } else {
-        required <- c("movie_id", "review", "sentiment", "score")
-        missing <- setdiff(required, names(incoming))
-        if (length(missing)) stop(paste("Reviews CSV is missing:", paste(missing, collapse = ", ")))
-        incoming <- incoming %>% select(all_of(required))
-        incoming$movie_id <- as.integer(incoming$movie_id)
-        incoming$score <- as.numeric(incoming$score)
-        if (anyNA(incoming[, required])) stop("Review fields must be filled with valid values.")
-        unknown <- setdiff(unique(incoming$movie_id), movies$id)
-        if (length(unknown)) stop(paste("Unknown movie_id values:", paste(head(unknown, 8), collapse = ", ")))
-        if (any(!incoming$sentiment %in% c("Positive", "Mixed", "Critical"))) stop("sentiment must be Positive, Mixed, or Critical.")
-        if (any(incoming$score < 0 | incoming$score > 1)) stop("score must be between 0 and 1.")
-        dbWriteTable(db, "reviews", incoming, append = TRUE, row.names = FALSE)
-        reviews <<- load_reviews()
-        import_message(paste(nrow(incoming), "reviews added to SQLite."))
-      }
-      data_version(data_version() + 1L)
-    }, error = function(e) import_message(paste("Import failed:", conditionMessage(e))))
-  })
-  output$import_status <- renderUI({
-    msg <- import_message()
-    if (is.null(msg)) return(NULL)
-    div(style = "font-size:10px;color:#347c78;margin:7px 0;line-height:1.5;", msg)
-  })
-  filtered_movies <- reactive({
-    data_version()
-    d <- movies %>% filter(year >= input$year[1], year <= input$year[2], rating >= input$rating)
-    if (!is.null(input$genre) && input$genre != "All genres") d <- d %>% filter(genre == input$genre)
-    d
-  })
-  filtered_reviews <- reactive({ reviews %>% semi_join(filtered_movies(), by = c("movie_id" = "id")) })
+
+  filtered_movies <- reactive(movies)
+  filtered_reviews <- reactive(reviews)
   theme_screen <- function() theme_minimal(base_family = "sans", base_size = 10) + theme(
     plot.background = element_rect(fill = "#fffefa", color = NA), panel.background = element_rect(fill = "#fffefa", color = NA),
     panel.grid.minor = element_blank(), panel.grid.major.x = element_blank(), panel.grid.major.y = element_line(color = "#eeede7", linewidth = .45),
@@ -438,7 +307,7 @@ server <- function(input, output, session) {
     d <- filtered_movies(); r <- filtered_reviews()
     avg <- if (nrow(d)) mean(d$rating) else 0
     pos <- if (nrow(r)) mean(r$sentiment == "Positive") else 0
-    cards <- list(c("FILMS IN VIEW", fmt_num(nrow(d)), "Across the selected release window"),
+    cards <- list(c("FILMS IN SAMPLE", fmt_num(nrow(d)), "Included in this local dataset"),
                   c("AVERAGE RATING", sprintf("%.1f", avg), "Audience score · out of 10"),
                   c("AUDIENCE REVIEWS", fmt_num(nrow(r)), "A voice for every point of view"),
                   c("POSITIVE SENTIMENT", fmt_pct(pos), "Share of reviews with a warm response"))
@@ -463,7 +332,7 @@ server <- function(input, output, session) {
   })
   output$top_movies <- renderUI({
     d <- filtered_movies() %>% arrange(desc(rating),desc(votes)) %>% head(5)
-    if (!nrow(d)) return(div("No films match these filters."))
+    if (!nrow(d)) return(div("The movie sample is empty."))
     tags$table(class="data-table",tags$thead(tags$tr(tags$th("TITLE"),tags$th("GENRE"),tags$th("YEAR"),tags$th("SCORE"))),tags$tbody(lapply(seq_len(nrow(d)),function(i)tags$tr(tags$td(class="movie-name",d$title[i]),tags$td(d$genre[i]),tags$td(d$year[i]),tags$td(span(class="rating-pill",sprintf("%.1f",d$rating[i])))))) )
   })
   output$overview_insight <- renderUI({
@@ -485,7 +354,7 @@ server <- function(input, output, session) {
   output$genre_table <- renderUI({
     d <- filtered_movies(); r <- filtered_reviews()
     s <- d %>% group_by(genre) %>% summarise(films=n(),rating=mean(rating),.groups="drop") %>% left_join(r %>% group_by(genre) %>% summarise(positive=mean(sentiment=="Positive"),.groups="drop"),by="genre") %>% arrange(desc(rating))
-    if (!nrow(s)) return(div("No films match these filters."))
+    if (!nrow(s)) return(div("The movie sample is empty."))
     tags$table(class="data-table",tags$thead(tags$tr(lapply(c("GENRE","FILMS","AVG SCORE","POSITIVE"),tags$th))),tags$tbody(lapply(seq_len(nrow(s)),function(i)tags$tr(tags$td(class="movie-name",s$genre[i]),tags$td(s$films[i]),tags$td(span(class="rating-pill",sprintf("%.1f",s$rating[i]))),tags$td(ifelse(is.na(s$positive[i]),"—",fmt_pct(s$positive[i])))))))
   })
   output$sentiment_genre <- renderPlot({
@@ -496,7 +365,7 @@ server <- function(input, output, session) {
   output$review_cards <- renderUI({
     r <- filtered_reviews() %>% arrange(desc(score)) %>% distinct(movie_id,.keep_all=TRUE) %>% head(4)
     if (!nrow(r)) return(div("No reviews in this selection."))
-    lapply(seq_len(nrow(r)),function(i)div(class="review-card",div(class="review-quote",paste0("“",r$review[i],"”")),div(class="review-meta",span(r$title[i]),span(class="review-chip",paste(r$sentiment[i],"·",sprintf("%.0f%%",r$score[i]*100))))))
+    lapply(seq_len(nrow(r)),function(i)div(class="review-card",div(class="review-quote",paste0("“",r$review[i],"”")),div(class="review-meta",span(r$title[i]),span(class="review-chip",paste(r$sentiment[i],"· polarity",sprintf("%.0f%%",r$score[i]*100))))))
   })
   output$sentiment_time <- renderPlot({
     r <- filtered_reviews(); req(nrow(r)>0)
@@ -504,10 +373,8 @@ server <- function(input, output, session) {
     ggplot(s,aes(year,score)) + geom_ribbon(aes(ymin=0,ymax=score),fill="#e4efeb",alpha=.8) + geom_line(color="#347c78",linewidth=1) + geom_point(color="#d78266",size=1.5) + scale_y_continuous(limits=c(0,1),labels=function(x)paste0(x*100,"%")) + theme_screen()
   })
   output$movie_table <- renderUI({
-    d <- filtered_movies(); q <- trimws(if (is.null(input$search)) "" else input$search)
-    if (nzchar(q)) d <- d %>% filter(grepl(q,title,ignore.case=TRUE) | grepl(q,genre,ignore.case=TRUE))
-    d <- d %>% arrange(desc(rating)) %>% head(60)
-    if (!nrow(d)) return(div("No films found. Try a different title or adjust the filters."))
+    d <- filtered_movies() %>% arrange(desc(rating))
+    if (!nrow(d)) return(div("The movie sample is empty."))
     tags$table(class="data-table",tags$thead(tags$tr(lapply(c("DB ID","TITLE","GENRE","YEAR","AUDIENCE RATING","VOTES"),tags$th))),tags$tbody(lapply(seq_len(nrow(d)),function(i)tags$tr(tags$td(d$id[i]),tags$td(class="movie-name",d$title[i]),tags$td(d$genre[i]),tags$td(d$year[i]),tags$td(span(class="rating-pill",sprintf("%.1f",d$rating[i]))),tags$td(fmt_num(d$votes[i]))))))
   })
 }
