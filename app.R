@@ -29,9 +29,24 @@ dbExecute(db, "CREATE TABLE IF NOT EXISTS reviews (
   id INTEGER PRIMARY KEY AUTOINCREMENT, movie_id INTEGER NOT NULL, review TEXT NOT NULL,
   sentiment TEXT NOT NULL, score REAL NOT NULL,
   FOREIGN KEY(movie_id) REFERENCES movies(id))")
-if (dbGetQuery(db, "SELECT COUNT(*) AS n FROM movies")$n[1] == 0) {
+existing_movies <- dbGetQuery(db, "SELECT id, title, year FROM movies")
+seed_key <- paste(seed_movies$title, seed_movies$year, sep = "\r")
+existing_key <- paste(existing_movies$title, existing_movies$year, sep = "\r")
+missing_seed <- which(!(seed_key %in% existing_key))
+if (!nrow(existing_movies)) {
   dbWriteTable(db, "movies", seed_movies, append = TRUE, row.names = FALSE)
   dbWriteTable(db, "reviews", seed_reviews %>% select(movie_id, review, sentiment, score), append = TRUE, row.names = FALSE)
+} else if (length(missing_seed)) {
+  for (seed_index in missing_seed) {
+    movie <- seed_movies[seed_index, , drop = FALSE]
+    dbWriteTable(db, "movies", movie %>% select(title, genre, year, rating, votes), append = TRUE, row.names = FALSE)
+    movie_id <- dbGetQuery(db, "SELECT last_insert_rowid() AS id")$id[1]
+    movie_reviews <- seed_reviews[seed_reviews$movie_id == movie$id, , drop = FALSE]
+    if (nrow(movie_reviews)) {
+      movie_reviews$movie_id <- movie_id
+      dbWriteTable(db, "reviews", movie_reviews %>% select(movie_id, review, sentiment, score), append = TRUE, row.names = FALSE)
+    }
+  }
 }
 load_movies <- function() dbGetQuery(db, "SELECT id, title, genre, year, rating, votes FROM movies")
 load_reviews <- function() {
