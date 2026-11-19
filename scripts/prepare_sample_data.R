@@ -1,4 +1,4 @@
-# Download a reproducible 50-film sample from MansaT/Movie-Dataset.
+# Download a reproducible 200-film sample from MansaT/Movie-Dataset.
 # The source files contain IMDb user reviews and movie metadata; see README.md.
 
 prepare_sample_data <- function() {
@@ -15,7 +15,7 @@ genres <- c(
   "Fantasy", "History", "Horror", "Music", "Mystery", "Romance", "Sci-Fi",
   "Sport", "Thriller", "War"
 )
-sample_movie_count <- 50L
+sample_movie_count <- 200L
 review_limit <- 30L
 set.seed(20261118)
 download_dir <- tempfile("screen-sense-source-")
